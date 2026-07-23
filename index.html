@@ -134,6 +134,11 @@
   .step .n{flex-shrink:0;width:24px;height:24px;border-radius:50%;background:var(--surface2);color:var(--text);
     display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;margin-top:1px}
   .pip-note{font-size:12px;color:var(--text2);line-height:1.5;margin-top:12px}
+  .set-group{margin-bottom:16px}
+  .set-group > span{display:block;font-size:12px;color:var(--text2);font-weight:700;text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px}
+  .seg{display:flex;gap:8px}
+  .seg button{flex:1;padding:12px 0;border-radius:12px;background:var(--surface2);font-weight:700;font-size:14px}
+  .seg button.sel{background:#fff;color:#000}
   #pip-canvas{display:none}
   #pip-video{position:fixed;width:2px;height:2px;opacity:.01;pointer-events:none;bottom:0;left:0}
 
@@ -213,6 +218,7 @@
     </div>
     <div class="ctrl-row">
       <button class="pill" id="btn-pip">Fenetre flottante (PiP)</button>
+      <button class="pill" id="btn-set">Qualite</button>
     </div>
   </div>
 
@@ -245,6 +251,35 @@
   </div>
 </div>
 
+<!-- ============ SHEET REGLAGES QUALITE ============ -->
+<div class="sheet" id="set-sheet">
+  <div class="sheet-inner">
+    <h2>Qualite d'enregistrement</h2>
+    <div class="set-group"><span>Definition demandee</span>
+      <div class="seg" id="seg-res">
+        <button data-v="720">720p</button>
+        <button data-v="1080">1080p</button>
+        <button data-v="2160">Maximum</button>
+      </div>
+    </div>
+    <div class="set-group"><span>Fluidite</span>
+      <div class="seg" id="seg-fps">
+        <button data-v="30">30 i/s</button>
+        <button data-v="60">60 i/s</button>
+      </div>
+    </div>
+    <div class="set-group"><span>Finesse d'image (debit)</span>
+      <div class="seg" id="seg-mbps">
+        <button data-v="8">Standard</button>
+        <button data-v="12">Haute</button>
+        <button data-v="25">Maximale</button>
+      </div>
+    </div>
+    <p class="pip-note">iOS plafonne la definition accordee aux web apps : le badge en haut a droite affiche ce que ton iPhone accorde reellement apres chaque changement. Finesse Maximale = fichiers plus lourds. Pour depasser le plafond (4K, HDR), utilise la Fenetre flottante avec l'app Camera.</p>
+    <button class="btn-primary" id="set-close" style="width:100%;margin-top:6px">OK</button>
+  </div>
+</div>
+
 <canvas id="pip-canvas" width="720" height="404"></canvas>
 <video id="pip-video" playsinline muted></video>
 <div class="toast" id="toast"></div>
@@ -257,7 +292,7 @@ const store = {
   get scripts(){ try{ return JSON.parse(localStorage.getItem('pt.scripts')||'[]') }catch(e){ return [] } },
   set scripts(v){ localStorage.setItem('pt.scripts', JSON.stringify(v)) },
   get settings(){ let s={}; try{ s=JSON.parse(localStorage.getItem('pt.settings')||'{}') }catch(e){}
-    return Object.assign({speed:40, fs:32, facing:'user'}, s) },
+    return Object.assign({speed:40, fs:32, facing:'user', res:2160, fps:30, mbps:12}, s) },
   set settings(v){ localStorage.setItem('pt.settings', JSON.stringify(v)) }
 };
 let st = store.settings;
@@ -382,8 +417,10 @@ let stream = null;
 async function openCam(){
   stopCam();
   $('cam-error').classList.remove('on');
+  const RESMAP = {720:[1280,720], 1080:[1920,1080], 2160:[3840,2160]};
+  const wh = RESMAP[st.res] || RESMAP[2160];
   const constraints = {
-    video: { facingMode: st.facing, width:{ideal:3840}, height:{ideal:2160}, frameRate:{ideal:30} },
+    video: { facingMode: st.facing, width:{ideal:wh[0]}, height:{ideal:wh[1]}, frameRate:{ideal:st.fps||30} },
     audio: { echoCancellation:false, noiseSuppression:false }
   };
   try{
@@ -452,8 +489,9 @@ function startRec(){
   chunks = [];
   const mime = pickMime();
   try{
-    rec = new MediaRecorder(stream, mime ? {mimeType:mime, videoBitsPerSecond:12000000, audioBitsPerSecond:128000}
-                                          : {videoBitsPerSecond:12000000});
+    const vbs = (st.mbps || 12) * 1000000;
+    rec = new MediaRecorder(stream, mime ? {mimeType:mime, videoBitsPerSecond:vbs, audioBitsPerSecond:128000}
+                                          : {videoBitsPerSecond:vbs});
   }catch(e){
     try{ rec = new MediaRecorder(stream) }
     catch(e2){ toast("Enregistrement impossible : " + e2.name); recState='idle'; return }
@@ -636,6 +674,25 @@ pv.addEventListener('webkitpresentationmodechanged', ()=>{
 $('btn-pip').onclick = ()=>{ if(preparePip()) $('pip-sheet').classList.add('on') };
 $('pip-cancel').onclick = ()=>{ $('pip-sheet').classList.remove('on'); if(!inPip()) pipStopped() };
 $('pip-start').onclick = startPip;
+
+/* ================= Reglages qualite ================= */
+function renderSeg(){
+  [['seg-res','res'],['seg-fps','fps'],['seg-mbps','mbps']].forEach(([id,key])=>{
+    document.querySelectorAll('#'+id+' button').forEach(b=>b.classList.toggle('sel', +b.dataset.v === st[key]));
+  });
+}
+document.querySelectorAll('.seg button').forEach(b=>{
+  b.onclick = ()=>{
+    const key = b.parentElement.id.split('-')[1];
+    st[key] = +b.dataset.v; store.settings = st; renderSeg();
+    if(key !== 'mbps') openCam();  // renegocie le flux camera avec les nouvelles contraintes
+  };
+});
+$('btn-set').onclick = ()=>{
+  if(recState !== 'idle'){ toast("Stoppe l'enregistrement d'abord"); return }
+  renderSeg(); $('set-sheet').classList.add('on');
+};
+$('set-close').onclick = ()=>{ $('set-sheet').classList.remove('on') };
 
 /* ================= Init ================= */
 renderLib();
