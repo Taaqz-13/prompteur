@@ -575,7 +575,7 @@ function pipDraw(){
     return;
   }
   if(pipStartAt && now >= pipStartAt){ pipStartAt = 0; pipPlaying = true }
-  if(pipPlaying) pipY += st.speed * 1.3 * (33/1000);
+  if(pipPlaying && !pv.paused) pipY += st.speed * 1.3 * (33/1000);
   const total = pipLines.length * PIP.lh;
   if(pipY > total) pipY = total;
   cx.fillStyle = '#fff';
@@ -587,19 +587,26 @@ function pipDraw(){
   }
   cx.fillStyle = 'rgba(255,59,48,.85)'; cx.fillRect(0, 40 + PIP.lh, 5, PIP.lh);
 }
-async function startPip(){
-  if(!current) return;
+function inPip(){
+  return pv.webkitPresentationMode === 'picture-in-picture' || document.pictureInPictureElement === pv;
+}
+/* Prepare le flux des l'ouverture du panneau : le lancement PiP reste alors
+   dans le geste utilisateur direct (exigence iOS). */
+function preparePip(){
+  if(!current) return false;
+  if(!cv.captureStream){ toast('Ton navigateur ne supporte pas ce mode.'); return false }
   pipLines = pipWrap(current.text);
-  pipY = 0; pipPlaying = false; pipStartAt = Date.now() + 5000;
-  if(pipInt) clearInterval(pipInt);
+  pipY = 0; pipPlaying = false; pipStartAt = 0;
+  if(!pv.srcObject) pv.srcObject = cv.captureStream(30);
+  if(!pipInt) pipInt = setInterval(pipDraw, 33);
   pipDraw();
-  if(!pv.srcObject){
-    if(!cv.captureStream){ toast('Ton navigateur ne supporte pas ce mode.'); return }
-    pv.srcObject = cv.captureStream(30);
-  }
-  pipInt = setInterval(pipDraw, 33);
+  pv.play().catch(()=>{});
+  return true;
+}
+async function startPip(){
+  pipY = 0; pipPlaying = false; pipStartAt = Date.now() + 5000;
   try{
-    await pv.play();
+    if(pv.paused) pv.play().catch(()=>{});
     if(pv.webkitSupportsPresentationMode && pv.webkitSupportsPresentationMode('picture-in-picture')){
       pv.webkitSetPresentationMode('picture-in-picture');
     } else if(document.pictureInPictureEnabled && pv.requestPictureInPicture){
@@ -610,24 +617,24 @@ async function startPip(){
     $('pip-sheet').classList.remove('on');
     toast('Ouvre maintenant l\'app Camera', 3500);
   }catch(e){
-    clearInterval(pipInt); pipInt = null;
+    pipStartAt = 0;
     toast('PiP indisponible sur cette version d\'iOS. Utilise l\'enregistrement integre.', 4000);
   }
 }
 /* Pause / lecture depuis les controles natifs de la fenetre PiP */
 pv.addEventListener('pause', ()=>{ pipPlaying = false });
-pv.addEventListener('play',  ()=>{ if(!pipStartAt) pipPlaying = true });
+pv.addEventListener('play',  ()=>{ if(inPip() && !pipStartAt) pipPlaying = true });
 function pipStopped(){
   if(pipInt){ clearInterval(pipInt); pipInt = null }
-  pipPlaying = false;
+  pipPlaying = false; pipStartAt = 0;
   try{ pv.pause() }catch(e){}
 }
 pv.addEventListener('leavepictureinpicture', pipStopped);
 pv.addEventListener('webkitpresentationmodechanged', ()=>{
   if(pv.webkitPresentationMode === 'inline') pipStopped();
 });
-$('btn-pip').onclick = ()=>{ $('pip-sheet').classList.add('on') };
-$('pip-cancel').onclick = ()=>{ $('pip-sheet').classList.remove('on') };
+$('btn-pip').onclick = ()=>{ if(preparePip()) $('pip-sheet').classList.add('on') };
+$('pip-cancel').onclick = ()=>{ $('pip-sheet').classList.remove('on'); if(!inPip()) pipStopped() };
 $('pip-start').onclick = startPip;
 
 /* ================= Init ================= */
