@@ -278,7 +278,14 @@
         <button data-v="25">Maximale</button>
       </div>
     </div>
-    <p class="pip-note">iOS plafonne la definition accordee aux web apps : le badge en haut a droite affiche ce que ton iPhone accorde reellement apres chaque changement. Finesse Maximale = fichiers plus lourds. Pour depasser le plafond (4K, HDR), utilise la Fenetre flottante avec l'app Camera.</p>
+    <div class="set-group"><span>Volume micro</span>
+      <div class="seg" id="seg-gain">
+        <button data-v="1">Normal</button>
+        <button data-v="2">+6 dB</button>
+        <button data-v="4">+12 dB</button>
+      </div>
+    </div>
+    <p class="pip-note">iOS plafonne la definition accordee aux web apps : le badge en haut a droite affiche ce que ton iPhone accorde reellement apres chaque changement. Finesse Maximale = fichiers plus lourds. Volume micro : passe a +6 dB si tes videos sortent trop faibles, +12 dB en dernier recours (risque de saturation). Pour depasser le plafond (4K, HDR), utilise la Fenetre flottante avec l'app Camera.</p>
     <button class="btn-primary" id="set-close" style="width:100%;margin-top:6px">OK</button>
   </div>
 </div>
@@ -295,7 +302,7 @@ const store = {
   get scripts(){ try{ return JSON.parse(localStorage.getItem('pt.scripts')||'[]') }catch(e){ return [] } },
   set scripts(v){ localStorage.setItem('pt.scripts', JSON.stringify(v)) },
   get settings(){ let s={}; try{ s=JSON.parse(localStorage.getItem('pt.settings')||'{}') }catch(e){}
-    return Object.assign({speed:40, fs:32, facing:'user', res:2160, fps:30, mbps:12}, s) },
+    return Object.assign({speed:40, fs:32, facing:'user', res:2160, fps:30, mbps:12, gain:1}, s) },
   set settings(v){ localStorage.setItem('pt.settings', JSON.stringify(v)) }
 };
 let st = store.settings;
@@ -427,7 +434,7 @@ async function openCam(){
   const wh = RESMAP[st.res] || RESMAP[2160];
   const constraints = {
     video: { facingMode: st.facing, width:{ideal:wh[0]}, height:{ideal:wh[1]}, frameRate:{ideal:st.fps||30} },
-    audio: { echoCancellation:false, noiseSuppression:false }
+    audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:true }
   };
   try{
     stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -472,6 +479,37 @@ function pickMime(){
   for(const c of cands){ try{ if(MediaRecorder.isTypeSupported(c)) return c }catch(e){} }
   return '';
 }
+/* Amplification micro optionnelle (chaine WebAudio inseree avant l'enregistreur) */
+const AC = window.AudioContext || window.webkitAudioContext;
+let audioCtx = null, boostNodes = null;
+function ensureAudioCtx(){
+  if(st.gain > 1 && AC){
+    try{
+      audioCtx = audioCtx || new AC();
+      if(audioCtx.state === 'suspended') audioCtx.resume();
+    }catch(e){}
+  }
+}
+function buildRecStream(){
+  if(!(st.gain > 1) || !audioCtx || !stream || !stream.getAudioTracks().length) return stream;
+  try{
+    const src = audioCtx.createMediaStreamSource(stream);
+    const g = audioCtx.createGain(); g.gain.value = st.gain;
+    const dest = audioCtx.createMediaStreamDestination();
+    src.connect(g); g.connect(dest);
+    boostNodes = {src, g};
+    const s = new MediaStream();
+    stream.getVideoTracks().forEach(t => s.addTrack(t));
+    dest.stream.getAudioTracks().forEach(t => s.addTrack(t));
+    return s;
+  }catch(e){ boostNodes = null; return stream }
+}
+function releaseBoost(){
+  if(boostNodes){
+    try{ boostNodes.src.disconnect(); boostNodes.g.disconnect() }catch(e){}
+    boostNodes = null;
+  }
+}
 $('btn-rec').onclick = ()=>{
   if(recState==='idle') startCountdown();
   else if(recState==='rec') stopRec();
@@ -495,6 +533,7 @@ $('btn-pause').onclick = ()=>{
 function startCountdown(){
   if(!stream){ toast('Camera non disponible'); return }
   if(typeof MediaRecorder==='undefined'){ toast("Ton iOS ne supporte pas l'enregistrement web. Utilise le mode Fenetre flottante."); return }
+  ensureAudioCtx();  // dans le geste utilisateur : iOS exige un tap direct pour demarrer l'audio
   recState = 'count';
   let n = 3;
   $('countdown-n').textContent = n;
@@ -510,13 +549,14 @@ function startCountdown(){
 function startRec(){
   chunks = [];
   const mime = pickMime();
+  const recStream = buildRecStream();
   try{
     const vbs = (st.mbps || 12) * 1000000;
-    rec = new MediaRecorder(stream, mime ? {mimeType:mime, videoBitsPerSecond:vbs, audioBitsPerSecond:128000}
-                                          : {videoBitsPerSecond:vbs});
+    rec = new MediaRecorder(recStream, mime ? {mimeType:mime, videoBitsPerSecond:vbs, audioBitsPerSecond:128000}
+                                            : {videoBitsPerSecond:vbs});
   }catch(e){
-    try{ rec = new MediaRecorder(stream) }
-    catch(e2){ toast("Enregistrement impossible : " + e2.name); recState='idle'; return }
+    try{ rec = new MediaRecorder(recStream) }
+    catch(e2){ toast("Enregistrement impossible : " + e2.name); recState='idle'; releaseBoost(); return }
   }
   rec.ondataavailable = e=>{ if(e.data && e.data.size) chunks.push(e.data) };
   rec.onstop = onRecStop;
@@ -548,6 +588,7 @@ function onRecStop(){
   $('btn-flip').disabled = false; $('btn-back').disabled = false;
   $('btn-back').classList.remove('hide');
   $('btn-pause').classList.add('hide');
+  releaseBoost();
   setPlaying(false);
   const dur = Math.round((Date.now()-recT0-recPausedTotal)/1000);
   recState = 'idle';
@@ -706,7 +747,7 @@ $('pip-start').onclick = startPip;
 
 /* ================= Reglages qualite ================= */
 function renderSeg(){
-  [['seg-res','res'],['seg-fps','fps'],['seg-mbps','mbps']].forEach(([id,key])=>{
+  [['seg-res','res'],['seg-fps','fps'],['seg-mbps','mbps'],['seg-gain','gain']].forEach(([id,key])=>{
     document.querySelectorAll('#'+id+' button').forEach(b=>b.classList.toggle('sel', +b.dataset.v === st[key]));
   });
 }
@@ -714,7 +755,7 @@ document.querySelectorAll('.seg button').forEach(b=>{
   b.onclick = ()=>{
     const key = b.parentElement.id.split('-')[1];
     st[key] = +b.dataset.v; store.settings = st; renderSeg();
-    if(key !== 'mbps') openCam();  // renegocie le flux camera avec les nouvelles contraintes
+    if(key === 'res' || key === 'fps') openCam();  // seules ces contraintes exigent de renegocier le flux
   };
 });
 $('btn-set').onclick = ()=>{
