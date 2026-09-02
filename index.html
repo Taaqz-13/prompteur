@@ -120,6 +120,9 @@
   .rv-head button{color:var(--blue);font-size:16px;padding:6px}
   #rv-video{flex:1;width:100%;object-fit:contain;background:#000;min-height:0}
   .rv-info{text-align:center;color:var(--text2);font-size:13px;padding:10px 16px 4px}
+  .rv-alert{display:none;margin:10px 16px 0;padding:10px 12px;border-radius:12px;font-size:13px;
+    line-height:1.4;background:rgba(255,69,58,.16);color:#ff9f97;text-align:center}
+  .rv-alert.on{display:block}
   .rv-actions{display:flex;flex-direction:column;gap:10px;padding:10px 20px calc(var(--sab) + 18px)}
   .rv-actions .btn-primary{width:100%;text-align:center}
   .rv-actions .btn-ghost{width:100%;text-align:center;background:var(--surface);color:var(--text);
@@ -232,6 +235,7 @@
 <section class="screen" id="s-review">
   <div class="rv-head"><b>Ta video</b><button id="rv-close">Fermer</button></div>
   <video id="rv-video" controls playsinline></video>
+  <div class="rv-alert" id="rv-alert"></div>
   <div class="rv-info" id="rv-info"></div>
   <div class="rv-actions">
     <button class="btn-primary" id="rv-save">Enregistrer dans Photos</button>
@@ -274,9 +278,8 @@
     <div class="set-group"><span>Finesse d'image (debit, en Mbps)</span>
       <div class="seg" id="seg-mbps">
         <button data-v="0">Auto</button>
+        <button data-v="16">16</button>
         <button data-v="25">25</button>
-        <button data-v="50">50</button>
-        <button data-v="100">100</button>
       </div>
     </div>
     <p class="pip-note" id="set-vbr-note"></p>
@@ -298,9 +301,9 @@ const store = {
   set scripts(v){ localStorage.setItem('pt.scripts', JSON.stringify(v)) },
   get settings(){ let s={}; try{ s=JSON.parse(localStorage.getItem('pt.settings')||'{}') }catch(e){}
     const d = Object.assign({speed:40, fs:32, facing:'user', res:1080, fps:30, mbps:0, qv:0}, s);
-    /* Migration v2 : l'ancien couple "Maximum + 12 Mbps fixe" sous-alimentait l'encodeur
-       (blocs de compression des que le sujet bouge). Debit auto + 1080p par defaut. */
-    if(d.qv !== 2){ d.res = 1080; d.mbps = 0; d.qv = 2 }
+    /* v2 : "Maximum + 12 Mbps fixe" sous-alimentait l'encodeur (blocs des que le sujet bouge).
+       v3 : retour a un debit auto prudent apres le decrochage de l'encodeur en v2. */
+    if(d.qv !== 3){ d.res = 1080; d.mbps = 0; d.qv = 3 }
     return d },
   set settings(v){ localStorage.setItem('pt.settings', JSON.stringify(v)) }
 };
@@ -477,13 +480,14 @@ document.addEventListener('visibilitychange', ()=>{
 
 /* ================= Prompteur : enregistrement ================= */
 let rec = null, chunks = [], recState = 'idle', recT0 = 0, recTimerInt = null, lastBlob = null, lastMeta = {};
-let recTargetVbs = 0, recMime = '';
-/* Debit cible. Calibre sur l'app Camera d'Apple (1080p30 ~ 17 Mbps, 4K30 ~ 50 Mbps)
-   avec de la marge, car l'encodeur de Safari est moins efficace : 0,30 bit par pixel
-   et par image. En dessous, chaque mouvement de tete fait apparaitre des blocs. */
+let recTargetVbs = 0, recMime = '', lastChunkT = 0, stallInt = null;
+/* Debit cible, en bits par pixel et par image sur la definition REELLEMENT accordee.
+   0,20 bpp = 12 Mbps en 1080p30, soit le reglage sur lequel l'app a toujours enregistre
+   sans decrocher. Plafond dur a 25 Mbps : au-dela, l'encodeur de Safari decroche, l'image
+   se fige et l'enregistrement part en fichier a rallonge. */
 function autoBitrate(w, h, fps){
   const px = (w || 1920) * (h || 1080) * (fps || 30);
-  return Math.round(Math.min(120e6, Math.max(8e6, px * 0.30)));
+  return Math.round(Math.min(25e6, Math.max(8e6, px * 0.20)));
 }
 function trackSettings(){
   const t = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
@@ -499,28 +503,21 @@ function renderVbrNote(){
   const s = trackSettings();
   const auto = autoBitrate(s.width, s.height, s.frameRate);
   el.textContent = st.mbps
-    ? 'Debit force a ' + st.mbps + ' Mbps (auto conseille ici : ' + (auto/1e6).toFixed(0) + ' Mbps).'
-    : 'Auto : ' + (auto/1e6).toFixed(0) + ' Mbps, calcule sur la definition et la fluidite reellement accordees. Monte au-dessus seulement si des blocs restent visibles dans les mouvements.';
+    ? 'Debit force a ' + st.mbps + ' Mbps (auto conseille ici : ' + (auto/1e6).toFixed(0) + ' Mbps). Si l\'image se fige pendant la prise, redescends : l\'encodeur de Safari decroche.'
+    : 'Auto : ' + (auto/1e6).toFixed(0) + ' Mbps, calcule sur la definition et la fluidite reellement accordees. Ne monte au-dessus que si des blocs restent visibles dans les mouvements, et redescends aussitot si l\'image se fige.';
 }
 
-/* Profils H.264 par ordre de qualite decroissante. Le profil High (avc1.64xxxx) encode
-   nettement mieux qu'un Baseline a debit egal : on le demande explicitement au lieu de
-   laisser Safari choisir. */
-const MIME_CANDS = [
-  'video/mp4;codecs=avc1.640034,mp4a.40.2',
-  'video/mp4;codecs=avc1.640028,mp4a.40.2',
-  'video/mp4;codecs=avc1.4d0028,mp4a.40.2',
-  'video/mp4',
-  'video/webm;codecs=vp9,opus',
-  'video/webm'
-];
+/* On ne force PLUS le profil H.264. Demander explicitement un High 5.2
+   (avc1.640034) faisait basculer Safari iOS sur un chemin d'encodage qu'il ne tenait
+   pas : image figee, interface bloquee, et enregistrement impossible a arreter qui
+   partait en fichier de plusieurs centaines de secondes. isTypeSupported() repondait
+   pourtant oui. On laisse Safari choisir son profil, comme avant. */
+const MIME_CANDS = ['video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm'];
 function supportedMimes(){
   return MIME_CANDS.filter(function(c){ try{ return MediaRecorder.isTypeSupported(c) }catch(e){ return false } });
 }
 function mimeLabel(m){
   if(!m) return 'defaut';
-  if(m.indexOf('avc1.64') > -1) return 'H.264 High';
-  if(m.indexOf('avc1.4d') > -1) return 'H.264 Main';
   if(m.indexOf('vp9') > -1) return 'VP9';
   return m.split(';')[0].replace('video/','').toUpperCase();
 }
@@ -569,7 +566,13 @@ function startRec(){
   const cands = supportedMimes();
   for(let i = 0; i < cands.length; i++){
     try{
-      rec = new MediaRecorder(stream, {mimeType:cands[i], videoBitsPerSecond:vbs, audioBitsPerSecond:192000});
+      /* Audio pousse a 256 kbps : au-dela de la transparence pour une voix, et ca ne
+         pese que 2 % du fichier a cote de la video. C'est le SEUL levier audio sur.
+         On ne touche pas aux contraintes du micro : `audio: true` nu est ce qui laisse
+         iOS appliquer son gain automatique. Y toucher (echoCancellation /
+         noiseSuppression a false) coupe ce gain et fait chuter le niveau, c'est
+         exactement ce qui avait rendu le son inaudible en juillet. */
+      rec = new MediaRecorder(stream, {mimeType:cands[i], videoBitsPerSecond:vbs, audioBitsPerSecond:256000});
       recMime = cands[i]; break;
     }catch(e){}
   }
@@ -580,9 +583,23 @@ function startRec(){
       catch(e2){ toast("Enregistrement impossible : " + e2.name); recState='idle'; return }
     }
   }
-  rec.ondataavailable = e=>{ if(e.data && e.data.size) chunks.push(e.data) };
+  rec.ondataavailable = e=>{ lastChunkT = Date.now(); if(e.data && e.data.size) chunks.push(e.data) };
   rec.onstop = onRecStop;
   rec.start(1000);
+  /* Chien de garde. On demande un morceau par seconde : si plus rien n'arrive pendant
+     6 s alors qu'on est cense enregistrer, c'est que l'encodeur a decroche. On coupe
+     nous-memes, sinon la prise continue de courir sans que rien ne reponde a l'ecran
+     et le fichier final fait plusieurs centaines de secondes. */
+  lastChunkT = Date.now();
+  clearInterval(stallInt);
+  stallInt = setInterval(()=>{
+    if(!rec || rec.state !== 'recording') return;   // ne se declenche pas sur une pause volontaire
+    if(Date.now() - lastChunkT > 6000){
+      clearInterval(stallInt); stallInt = null;
+      toast("L'encodeur a decroche : prise stoppee avant de partir en fichier a rallonge. Baisse le debit dans Qualite.");
+      try{ stopRec() }catch(e){}
+    }
+  }, 1000);
   recState = 'rec';
   recPausedTotal = 0; pauseStart = 0;
   $('btn-rec').classList.add('rec');
@@ -604,6 +621,7 @@ function stopRec(){
 }
 function onRecStop(){
   clearInterval(recTimerInt);
+  clearInterval(stallInt); stallInt = null;
   if(pauseStart){ recPausedTotal += Date.now()-pauseStart; pauseStart = 0 }
   $('rec-timer').classList.remove('on'); $('rec-timer').classList.remove('paused');
   $('btn-rec').classList.remove('rec');
@@ -627,6 +645,26 @@ function onRecStop(){
   stopCam();
   const v = $('rv-video');
   if(v.src) URL.revokeObjectURL(v.src);
+  /* Duree annoncee par le fichier lui-meme, comparee au chrono de la prise : c'est
+     ce qui revele une video qui part en centaines de secondes alors que la prise
+     etait courte. Un blob MediaRecorder annonce souvent Infinity avant un seek. */
+  const checkDur = ()=>{
+    const d = v.duration;
+    if(!isFinite(d) || dur <= 0) return;
+    if(d > dur * 1.5 + 3 || d < dur * 0.5){
+      $('rv-alert').textContent = 'Attention : le fichier annonce ' + Math.round(d)
+        + ' s alors que la prise a dure ' + dur + ' s. L\'encodeur a decroche pendant la prise :'
+        + ' refais-la avec un debit plus bas (reglages Qualite).';
+      $('rv-alert').classList.add('on');
+    }
+  };
+  v.onloadedmetadata = ()=>{
+    /* Un blob MediaRecorder annonce souvent Infinity tant qu'on n'a pas cherche la fin. */
+    if(isFinite(v.duration)){ checkDur(); return }
+    v.onseeked = ()=>{ v.onseeked = null; checkDur(); try{ v.currentTime = 0 }catch(e){} };
+    try{ v.currentTime = 1e6 }catch(e){ }
+  };
+  $('rv-alert').classList.remove('on');
   v.src = URL.createObjectURL(lastBlob);
   const bas = realVbs > 0 && recTargetVbs > 0 && realVbs < recTargetVbs * 0.6;
   $('rv-info').innerHTML =
@@ -635,7 +673,7 @@ function onRecStop(){
     ' · ' + (lastBlob.size/1048576).toFixed(1) + ' Mo · ' + mimeLabel(recMime || type) +
     '<br>' + (realVbs/1e6).toFixed(1) + ' Mbps reels' +
     (recTargetVbs ? ' / ' + (recTargetVbs/1e6).toFixed(0) + ' demandes' : '') +
-    (bas ? ' · Safari a bride le debit : passe par la Fenetre flottante pour monter plus haut.' : '');
+    (bas ? ' · nettement sous la cible : soit la scene etait simple a encoder, soit Safari plafonne. Si l\'image te parait sale malgre ca, c\'est la seconde raison.' : '');
   show('s-review');
 }
 
