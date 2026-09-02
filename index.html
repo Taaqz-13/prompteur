@@ -271,14 +271,16 @@
         <button data-v="60">60 i/s</button>
       </div>
     </div>
-    <div class="set-group"><span>Finesse d'image (debit)</span>
+    <div class="set-group"><span>Finesse d'image (debit, en Mbps)</span>
       <div class="seg" id="seg-mbps">
-        <button data-v="8">Standard</button>
-        <button data-v="12">Haute</button>
-        <button data-v="25">Maximale</button>
+        <button data-v="0">Auto</button>
+        <button data-v="25">25</button>
+        <button data-v="50">50</button>
+        <button data-v="100">100</button>
       </div>
     </div>
-    <p class="pip-note">iOS plafonne la definition accordee aux web apps : le badge en haut a droite affiche ce que ton iPhone accorde reellement apres chaque changement. Finesse Maximale = fichiers plus lourds. Pour depasser le plafond (4K, HDR), utilise la Fenetre flottante avec l'app Camera.</p>
+    <p class="pip-note" id="set-vbr-note"></p>
+    <p class="pip-note">iOS plafonne la definition accordee aux web apps : le badge en haut a droite affiche la definition reellement accordee et le debit qui sera applique. Apres chaque prise, la fiche de relecture indique le debit REELLEMENT obtenu : s'il est tres inferieur au debit demande, c'est Safari qui bride, et seule la Fenetre flottante avec l'app Camera (4K, HDR) permettra de monter plus haut.</p>
     <button class="btn-primary" id="set-close" style="width:100%;margin-top:6px">OK</button>
   </div>
 </div>
@@ -295,10 +297,15 @@ const store = {
   get scripts(){ try{ return JSON.parse(localStorage.getItem('pt.scripts')||'[]') }catch(e){ return [] } },
   set scripts(v){ localStorage.setItem('pt.scripts', JSON.stringify(v)) },
   get settings(){ let s={}; try{ s=JSON.parse(localStorage.getItem('pt.settings')||'{}') }catch(e){}
-    return Object.assign({speed:40, fs:32, facing:'user', res:2160, fps:30, mbps:12}, s) },
+    const d = Object.assign({speed:40, fs:32, facing:'user', res:1080, fps:30, mbps:0, qv:0}, s);
+    /* Migration v2 : l'ancien couple "Maximum + 12 Mbps fixe" sous-alimentait l'encodeur
+       (blocs de compression des que le sujet bouge). Debit auto + 1080p par defaut. */
+    if(d.qv !== 2){ d.res = 1080; d.mbps = 0; d.qv = 2 }
+    return d },
   set settings(v){ localStorage.setItem('pt.settings', JSON.stringify(v)) }
 };
 let st = store.settings;
+store.settings = st;   /* fige tout de suite la migration de reglages en memoire */
 let current = null;          // script affiche dans le prompteur
 let editingId = null;        // script en cours d'edition
 
@@ -443,7 +450,10 @@ async function openCam(){
   $('cam').srcObject = stream;
   $('cam').classList.toggle('mirror', st.facing==='user');
   const s = stream.getVideoTracks()[0].getSettings();
-  $('badge-res').textContent = (s.width||'?') + 'x' + (s.height||'?') + (s.frameRate ? ' · ' + Math.round(s.frameRate) + ' i/s' : '');
+  $('badge-res').textContent = (s.width||'?') + 'x' + (s.height||'?')
+    + (s.frameRate ? ' · ' + Math.round(s.frameRate) + ' i/s' : '')
+    + ' · ' + (targetBitrate()/1e6).toFixed(0) + ' Mbps';
+  renderVbrNote();
 }
 function stopCam(){
   if(stream){ stream.getTracks().forEach(t=>t.stop()); stream = null }
@@ -467,10 +477,52 @@ document.addEventListener('visibilitychange', ()=>{
 
 /* ================= Prompteur : enregistrement ================= */
 let rec = null, chunks = [], recState = 'idle', recT0 = 0, recTimerInt = null, lastBlob = null, lastMeta = {};
-function pickMime(){
-  const cands = ['video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm'];
-  for(const c of cands){ try{ if(MediaRecorder.isTypeSupported(c)) return c }catch(e){} }
-  return '';
+let recTargetVbs = 0, recMime = '';
+/* Debit cible. Calibre sur l'app Camera d'Apple (1080p30 ~ 17 Mbps, 4K30 ~ 50 Mbps)
+   avec de la marge, car l'encodeur de Safari est moins efficace : 0,30 bit par pixel
+   et par image. En dessous, chaque mouvement de tete fait apparaitre des blocs. */
+function autoBitrate(w, h, fps){
+  const px = (w || 1920) * (h || 1080) * (fps || 30);
+  return Math.round(Math.min(120e6, Math.max(8e6, px * 0.30)));
+}
+function trackSettings(){
+  const t = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+  return t ? t.getSettings() : {};
+}
+function targetBitrate(){
+  if(st.mbps) return st.mbps * 1000000;
+  const s = trackSettings();
+  return autoBitrate(s.width, s.height, s.frameRate);
+}
+function renderVbrNote(){
+  const el = $('set-vbr-note'); if(!el) return;
+  const s = trackSettings();
+  const auto = autoBitrate(s.width, s.height, s.frameRate);
+  el.textContent = st.mbps
+    ? 'Debit force a ' + st.mbps + ' Mbps (auto conseille ici : ' + (auto/1e6).toFixed(0) + ' Mbps).'
+    : 'Auto : ' + (auto/1e6).toFixed(0) + ' Mbps, calcule sur la definition et la fluidite reellement accordees. Monte au-dessus seulement si des blocs restent visibles dans les mouvements.';
+}
+
+/* Profils H.264 par ordre de qualite decroissante. Le profil High (avc1.64xxxx) encode
+   nettement mieux qu'un Baseline a debit egal : on le demande explicitement au lieu de
+   laisser Safari choisir. */
+const MIME_CANDS = [
+  'video/mp4;codecs=avc1.640034,mp4a.40.2',
+  'video/mp4;codecs=avc1.640028,mp4a.40.2',
+  'video/mp4;codecs=avc1.4d0028,mp4a.40.2',
+  'video/mp4',
+  'video/webm;codecs=vp9,opus',
+  'video/webm'
+];
+function supportedMimes(){
+  return MIME_CANDS.filter(function(c){ try{ return MediaRecorder.isTypeSupported(c) }catch(e){ return false } });
+}
+function mimeLabel(m){
+  if(!m) return 'defaut';
+  if(m.indexOf('avc1.64') > -1) return 'H.264 High';
+  if(m.indexOf('avc1.4d') > -1) return 'H.264 Main';
+  if(m.indexOf('vp9') > -1) return 'VP9';
+  return m.split(';')[0].replace('video/','').toUpperCase();
 }
 $('btn-rec').onclick = ()=>{
   if(recState==='idle') startCountdown();
@@ -509,14 +561,24 @@ function startCountdown(){
 }
 function startRec(){
   chunks = [];
-  const mime = pickMime();
-  try{
-    const vbs = (st.mbps || 12) * 1000000;
-    rec = new MediaRecorder(stream, mime ? {mimeType:mime, videoBitsPerSecond:vbs, audioBitsPerSecond:128000}
-                                          : {videoBitsPerSecond:vbs});
-  }catch(e){
-    try{ rec = new MediaRecorder(stream) }
-    catch(e2){ toast("Enregistrement impossible : " + e2.name); recState='idle'; return }
+  const vbs = targetBitrate();
+  recTargetVbs = vbs; recMime = '';
+  /* On descend l'echelle des profils : si l'un est annonce supporte mais que le
+     constructeur refuse, on essaie le suivant plutot que de tomber en qualite par defaut. */
+  rec = null;
+  const cands = supportedMimes();
+  for(let i = 0; i < cands.length; i++){
+    try{
+      rec = new MediaRecorder(stream, {mimeType:cands[i], videoBitsPerSecond:vbs, audioBitsPerSecond:192000});
+      recMime = cands[i]; break;
+    }catch(e){}
+  }
+  if(!rec){
+    try{ rec = new MediaRecorder(stream, {videoBitsPerSecond:vbs}) }
+    catch(e){
+      try{ rec = new MediaRecorder(stream) }
+      catch(e2){ toast("Enregistrement impossible : " + e2.name); recState='idle'; return }
+    }
   }
   rec.ondataavailable = e=>{ if(e.data && e.data.size) chunks.push(e.data) };
   rec.onstop = onRecStop;
@@ -556,17 +618,24 @@ function onRecStop(){
   lastBlob = new Blob(chunks, {type});
   chunks = [];
   const set = stream && stream.getVideoTracks()[0] ? stream.getVideoTracks()[0].getSettings() : {};
-  lastMeta = { dur, type, w:set.width, h:set.height };
+  /* Debit reel = ce que Safari a vraiment encode. C'est la seule mesure qui dit si
+     le reglage a servi a quelque chose : s'il s'effondre sous la cible, le navigateur bride. */
+  const realVbs = dur > 0 ? (lastBlob.size * 8) / dur : 0;
+  lastMeta = { dur, type, w:set.width, h:set.height, vbs:realVbs, target:recTargetVbs, mime:recMime };
   /* Couper camera ET micro avant la relecture : micro ouvert = iOS baisse
      d'office le volume de lecture (mode "appel en cours"). */
   stopCam();
   const v = $('rv-video');
   if(v.src) URL.revokeObjectURL(v.src);
   v.src = URL.createObjectURL(lastBlob);
-  $('rv-info').textContent =
+  const bas = realVbs > 0 && recTargetVbs > 0 && realVbs < recTargetVbs * 0.6;
+  $('rv-info').innerHTML =
     (lastMeta.w ? lastMeta.w + 'x' + lastMeta.h + ' · ' : '') +
     String(Math.floor(dur/60)).padStart(2,'0') + ':' + String(dur%60).padStart(2,'0') +
-    ' · ' + (lastBlob.size/1048576).toFixed(1) + ' Mo · ' + (type==='video/mp4'?'MP4 (H.264)':type);
+    ' · ' + (lastBlob.size/1048576).toFixed(1) + ' Mo · ' + mimeLabel(recMime || type) +
+    '<br>' + (realVbs/1e6).toFixed(1) + ' Mbps reels' +
+    (recTargetVbs ? ' / ' + (recTargetVbs/1e6).toFixed(0) + ' demandes' : '') +
+    (bas ? ' · Safari a bride le debit : passe par la Fenetre flottante pour monter plus haut.' : '');
   show('s-review');
 }
 
@@ -712,12 +781,17 @@ function renderSeg(){
   [['seg-res','res'],['seg-fps','fps'],['seg-mbps','mbps']].forEach(([id,key])=>{
     document.querySelectorAll('#'+id+' button').forEach(b=>b.classList.toggle('sel', +b.dataset.v === st[key]));
   });
+  renderVbrNote();
 }
 document.querySelectorAll('.seg button').forEach(b=>{
   b.onclick = ()=>{
     const key = b.parentElement.id.split('-')[1];
     st[key] = +b.dataset.v; store.settings = st; renderSeg();
     if(key === 'res' || key === 'fps') openCam();  // seules ces contraintes exigent de renegocier le flux
+    else if(key === 'mbps'){ const s = trackSettings();
+      $('badge-res').textContent = (s.width||'?') + 'x' + (s.height||'?')
+        + (s.frameRate ? ' · ' + Math.round(s.frameRate) + ' i/s' : '')
+        + ' · ' + (targetBitrate()/1e6).toFixed(0) + ' Mbps' }
   };
 });
 $('btn-set').onclick = ()=>{
