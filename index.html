@@ -59,7 +59,22 @@
   /* ---------- Prompteur ---------- */
   #s-prompt{background:#000}
   #cam{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
+  /* Quand le flux accorde ne correspond pas au format choisi, on montre le VRAI cadre
+     plutot que le recadrage flatteur de `cover` : sinon on cadre sur une image qui
+     n'est pas celle qui part a l'enregistrement. */
+  #cam.fit{object-fit:contain}
   #cam.mirror{transform:scaleX(-1)}
+  .fmt-warn{position:absolute;top:calc(var(--sat) + 44px);left:12px;right:12px;z-index:4;display:none;
+    background:rgba(255,69,58,.92);border-radius:10px;padding:7px 11px;font-size:11.5px;font-weight:600;
+    color:#fff;text-align:center;line-height:1.35}
+  .fmt-warn.on{display:block}
+  /* Reperes 4:5 : bandes de ce que le fil Meta rognera en haut et en bas. */
+  .guide{position:absolute;inset:0;z-index:1;display:none;pointer-events:none}
+  .guide.on{display:block}
+  .guide::before,.guide::after{content:'';position:absolute;left:0;right:0;height:var(--band,0px);
+    background:rgba(0,0,0,.45);box-shadow:inset 0 0 0 1px rgba(255,255,255,.16)}
+  .guide::before{top:0}
+  .guide::after{bottom:0}
   .cam-error{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;
     gap:16px;padding:0 34px;text-align:center;background:#000;z-index:5}
   .cam-error.on{display:flex}
@@ -133,7 +148,8 @@
   /* ---------- PiP ---------- */
   .sheet{position:absolute;inset:0;z-index:8;display:none;flex-direction:column;justify-content:flex-end;background:rgba(0,0,0,.5)}
   .sheet.on{display:flex}
-  .sheet-inner{background:var(--surface);border-radius:20px 20px 0 0;padding:22px 22px calc(var(--sab) + 22px)}
+  .sheet-inner{background:var(--surface);border-radius:20px 20px 0 0;padding:22px 22px calc(var(--sab) + 22px);
+    max-height:88%;overflow-y:auto;-webkit-overflow-scrolling:touch}
   .sheet-inner h2{font-size:20px;font-weight:800;margin-bottom:12px}
   .steps{display:flex;flex-direction:column;gap:10px;margin-bottom:16px}
   .step{display:flex;gap:12px;align-items:flex-start;font-size:14px;line-height:1.45;color:var(--text2)}
@@ -194,9 +210,11 @@
     <button class="btn-primary" id="btn-cam-retry">Reessayer</button>
   </div>
 
+  <div class="guide" id="guide"></div>
   <div class="tp" id="tp"><div class="tp-text" id="tp-text"></div></div>
   <div class="tp-paused" id="tp-paused">En pause : tape pour reprendre, glisse pour te replacer</div>
   <div class="badge-res" id="badge-res"></div>
+  <div class="fmt-warn" id="fmt-warn"></div>
   <div class="rec-timer" id="rec-timer"><span class="rec-dot"></span><span id="rec-time">00:00</span></div>
 
   <div class="ctrl" id="ctrl">
@@ -267,6 +285,13 @@
 <div class="sheet" id="set-sheet">
   <div class="sheet-inner">
     <h2>Qualite d'enregistrement</h2>
+    <div class="set-group"><span>Format de sortie</span>
+      <div class="seg" id="seg-fmt">
+        <button data-v="916">9:16 Reel</button>
+        <button data-v="45">4:5 Feed</button>
+        <button data-v="169">16:9</button>
+      </div>
+    </div>
     <div class="set-group"><span>Definition demandee</span>
       <div class="seg" id="seg-res">
         <button data-v="720">720p</button>
@@ -283,11 +308,13 @@
     <div class="set-group"><span>Finesse d'image (debit, en Mbps)</span>
       <div class="seg" id="seg-mbps">
         <button data-v="0">Auto</button>
-        <button data-v="16">16</button>
+        <button data-v="12">12</button>
         <button data-v="25">25</button>
       </div>
     </div>
     <p class="pip-note" id="set-vbr-note"></p>
+    <p class="pip-note">Pour Meta, filme en 9:16 ou en 4:5 : ces deux formats se capturent en portrait 1080x1920, et le 4:5 n'est qu'un recadrage centre du 9:16, donc aucun agrandissement au montage. Filmer en 16:9 puis recadrer en vertical ne garde qu'environ 600 px de large, ensuite agrandis a 1080 : c'est la plus grosse perte de qualite possible, avant meme l'encodage.</p>
+    <p class="pip-note">30 i/s plutot que 60 : a debit egal, le 60 i/s coupe en deux les bits disponibles par image, et c'est exactement la que les blocs apparaissent dans les mouvements. Meta ne diffuse pas en 60 i/s.</p>
     <p class="pip-note">iOS plafonne la definition accordee aux web apps : le badge en haut a droite affiche la definition reellement accordee et le debit qui sera applique. Apres chaque prise, la fiche de relecture indique le debit REELLEMENT obtenu : s'il est tres inferieur au debit demande, c'est Safari qui bride, et seule la Fenetre flottante avec l'app Camera (4K, HDR) permettra de monter plus haut.</p>
     <button class="btn-primary" id="set-close" style="width:100%;margin-top:6px">OK</button>
   </div>
@@ -305,7 +332,8 @@ const store = {
   get scripts(){ try{ return JSON.parse(localStorage.getItem('pt.scripts')||'[]') }catch(e){ return [] } },
   set scripts(v){ localStorage.setItem('pt.scripts', JSON.stringify(v)) },
   get settings(){ let s={}; try{ s=JSON.parse(localStorage.getItem('pt.settings')||'{}') }catch(e){}
-    const d = Object.assign({speed:40, fs:32, facing:'user', res:1080, fps:30, mbps:0, qv:0}, s);
+    const d = Object.assign({speed:40, fs:32, facing:'user', res:1080, fps:30, mbps:0, qv:0, fmt:916}, s);
+    if(d.mbps === 16) d.mbps = 0;   /* palier retire : on retombe sur l'auto, sinon reglage fantome */
     /* v2 : "Maximum + 12 Mbps fixe" sous-alimentait l'encodeur (blocs des que le sujet bouge).
        v3 : retour a un debit auto prudent apres le decrochage de l'encodeur en v2. */
     if(d.qv !== 3){ d.res = 1080; d.mbps = 0; d.qv = 3 }
@@ -477,8 +505,12 @@ let stream = null;
 async function openCam(){
   stopCam();
   $('cam-error').classList.remove('on');
+  /* 9:16 et 4:5 se filment tous les deux en portrait : le 4:5 est un recadrage CENTRE
+     du 9:16, il garde les 1080 px de large. On demande donc la definition dans le sens
+     ou elle sera publiee, au lieu de capturer en paysage pour rogner apres. */
   const RESMAP = {720:[1280,720], 1080:[1920,1080], 2160:[3840,2160]};
-  const wh = RESMAP[st.res] || RESMAP[2160];
+  const base = RESMAP[st.res] || RESMAP[2160];
+  const wh = st.fmt === 169 ? base : [base[1], base[0]];
   const constraints = {
     video: { facingMode: st.facing, width:{ideal:wh[0]}, height:{ideal:wh[1]}, frameRate:{ideal:st.fps||30} },
     audio: true
@@ -496,15 +528,50 @@ async function openCam(){
   }
   $('cam').srcObject = stream;
   $('cam').classList.toggle('mirror', st.facing==='user');
-  const s = stream.getVideoTracks()[0].getSettings();
-  $('badge-res').textContent = (s.width||'?') + 'x' + (s.height||'?')
-    + (s.frameRate ? ' · ' + Math.round(s.frameRate) + ' i/s' : '')
-    + ' · ' + (targetBitrate()/1e6).toFixed(0) + ' Mbps';
+  applyFormat();
+  renderBadge();
   renderVbrNote();
 }
 function stopCam(){
   if(stream){ stream.getTracks().forEach(t=>t.stop()); stream = null }
   $('cam').srcObject = null;
+}
+/* Le badge dit ce que iOS a ACCORDE, jamais ce qu'on a demande. */
+function renderBadge(){
+  const s = trackSettings();
+  $('badge-res').textContent = (s.width||'?') + 'x' + (s.height||'?')
+    + (s.frameRate ? ' · ' + Math.round(s.frameRate) + ' i/s' : '')
+    + ' · ' + (targetBitrate()/1e6).toFixed(0) + ' Mbps';
+}
+/* L'apercu est en `cover` : il remplit l'ecran en rognant. Si iOS accorde un flux
+   paysage alors qu'on filme un Reel, l'apercu a quand meme l'air vertical et on cadre
+   sur une image qui n'est pas celle qui sera enregistree. On letterboxe alors l'apercu
+   pour montrer le vrai cadre, et on le dit au lieu de laisser croire. */
+function applyFormat(){
+  const s = trackSettings();
+  const veutPortrait = st.fmt !== 169;
+  const aPortrait = (s.width && s.height) ? s.height > s.width : veutPortrait;
+  const ok = veutPortrait === aPortrait;
+  $('cam').classList.toggle('fit', !ok);
+  $('fmt-warn').classList.toggle('on', !ok);
+  if(!ok) $('fmt-warn').textContent = veutPortrait
+    ? 'iOS a accorde un flux paysage ' + s.width + 'x' + s.height + " : la video sera en 16:9, pas en vertical. Tiens le telephone en portrait et rouvre la camera, sinon il faudra recadrer au montage (grosse perte)."
+    : 'iOS a accorde un flux portrait ' + s.width + 'x' + s.height + ' alors que le 16:9 est demande.';
+  drawGuide(s);
+}
+/* Bandes de ce que le format 4:5 rognera. Calculees sur la geometrie reelle du flux
+   projete en `cover`, pas sur un pourcentage suppose : le rapport de l'ecran varie. */
+function drawGuide(s){
+  const g = $('guide');
+  if(!(st.fmt === 45 && s && s.width && s.height && !$('cam').classList.contains('fit'))){
+    g.classList.remove('on'); return;
+  }
+  g.classList.add('on');                             /* afficher AVANT de mesurer */
+  const cw = g.clientWidth || window.innerWidth;
+  const ch = g.clientHeight || window.innerHeight;
+  const k = Math.max(cw / s.width, ch / s.height);   /* echelle appliquee par `cover` */
+  const garde = s.width * 1.25 * k;                  /* 4:5 : hauteur conservee a largeur egale */
+  g.style.setProperty('--band', Math.max(0, (ch - garde) / 2) + 'px');
 }
 $('btn-cam-retry').onclick = openCam;
 $('btn-flip').onclick = ()=>{
@@ -533,12 +600,14 @@ document.addEventListener('visibilitychange', ()=>{
 let rec = null, chunks = [], recState = 'idle', recT0 = 0, recTimerInt = null, lastBlob = null, lastMeta = {};
 let recTargetVbs = 0, recMime = '', lastChunkT = 0, stallInt = null;
 /* Debit cible, en bits par pixel et par image sur la definition REELLEMENT accordee.
-   0,20 bpp = 12 Mbps en 1080p30, soit le reglage sur lequel l'app a toujours enregistre
-   sans decrocher. Plafond dur a 25 Mbps : au-dela, l'encodeur de Safari decroche, l'image
-   se fige et l'enregistrement part en fichier a rallonge. */
+   0,27 bpp = le calibrage de l'app Camera d'Apple, soit 17 Mbps en 1080p30. On etait a
+   0,20 (12 Mbps) : c'est la marge qui manquait dans les mouvements, la ou l'encodeur doit
+   redecrire toute l'image et tombe en macroblocs faute de bits. Plafond dur a 25 Mbps :
+   au-dela, l'encodeur de Safari decroche, l'image se fige et la prise part en fichier a
+   rallonge. Si ca arrive, le palier manuel 12 Mbps est le repli sur. */
 function autoBitrate(w, h, fps){
   const px = (w || 1920) * (h || 1080) * (fps || 30);
-  return Math.round(Math.min(25e6, Math.max(8e6, px * 0.20)));
+  return Math.round(Math.min(25e6, Math.max(8e6, px * 0.27)));
 }
 function trackSettings(){
   const t = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
@@ -867,7 +936,7 @@ $('pip-start').onclick = startPip;
 
 /* ================= Reglages qualite ================= */
 function renderSeg(){
-  [['seg-res','res'],['seg-fps','fps'],['seg-mbps','mbps']].forEach(([id,key])=>{
+  [['seg-fmt','fmt'],['seg-res','res'],['seg-fps','fps'],['seg-mbps','mbps']].forEach(([id,key])=>{
     document.querySelectorAll('#'+id+' button').forEach(b=>b.classList.toggle('sel', +b.dataset.v === st[key]));
   });
   renderVbrNote();
@@ -876,11 +945,13 @@ document.querySelectorAll('.seg button').forEach(b=>{
   b.onclick = ()=>{
     const key = b.parentElement.id.split('-')[1];
     st[key] = +b.dataset.v; store.settings = st; renderSeg();
-    if(key === 'res' || key === 'fps') openCam();  // seules ces contraintes exigent de renegocier le flux
-    else if(key === 'mbps'){ const s = trackSettings();
-      $('badge-res').textContent = (s.width||'?') + 'x' + (s.height||'?')
-        + (s.frameRate ? ' · ' + Math.round(s.frameRate) + ' i/s' : '')
-        + ' · ' + (targetBitrate()/1e6).toFixed(0) + ' Mbps' }
+    /* Le format change les dimensions demandees : il faut renegocier, comme res et fps.
+       Sauf le passage 9:16 <-> 4:5, qui capture exactement le meme flux portrait : la, on
+       redessine seulement les reperes, sans couper la camera. */
+    const memeFlux = key === 'fmt' && (st.fmt === 916 || st.fmt === 45)
+                     && !$('cam').classList.contains('fit');
+    if((key === 'res' || key === 'fps' || key === 'fmt') && !memeFlux) openCam();
+    else { applyFormat(); renderBadge() }
   };
 });
 $('btn-set').onclick = ()=>{
