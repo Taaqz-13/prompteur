@@ -533,6 +533,9 @@ async function openCam(){
   }
   $('cam').srcObject = stream;
   $('cam').classList.toggle('mirror', st.facing==='user');
+  /* Les dimensions rendues ne sont connues qu'une fois les metadonnees chargees : sans
+     ca on affiche et on controle le format de capture, pas l'image livree. */
+  $('cam').onloadedmetadata = ()=>{ applyFormat(); renderBadge(); renderVbrNote() };
   applyFormat();
   renderBadge();
   renderVbrNote();
@@ -541,10 +544,22 @@ function stopCam(){
   if(stream){ stream.getTracks().forEach(t=>t.stop()); stream = null }
   $('cam').srcObject = null;
 }
+/* 🚨 `getSettings()` rend le format de CAPTURE du capteur, toujours paysage, et il le
+   rend avant que l'orientation soit appliquee. Les images reellement livrees sont
+   pivotees selon l'orientation du telephone : c'est `videoWidth/videoHeight` de
+   l'element qui dit la verite. Constate le 2026-09-08 : piste annoncee 1920x1080 pour
+   un fichier enregistre en 1080x1920, ce qui declenchait une fausse alerte d'orientation.
+   Regle : pour ce qui est REELLEMENT filme, lire l'element video, pas la piste. */
+function renderedDims(){
+  const v = $('cam');
+  if(v && v.videoWidth && v.videoHeight) return {width:v.videoWidth, height:v.videoHeight};
+  const s = trackSettings();
+  return {width:s.width, height:s.height};
+}
 /* Le badge dit ce que iOS a ACCORDE, jamais ce qu'on a demande. */
 function renderBadge(){
-  const s = trackSettings();
-  $('badge-res').textContent = (s.width||'?') + 'x' + (s.height||'?')
+  const d = renderedDims(), s = trackSettings();
+  $('badge-res').textContent = (d.width||'?') + 'x' + (d.height||'?')
     + (s.frameRate ? ' · ' + Math.round(s.frameRate) + ' i/s' : '')
     + ' · ' + (targetBitrate()/1e6).toFixed(0) + ' Mbps';
 }
@@ -553,7 +568,7 @@ function renderBadge(){
    sur une image qui n'est pas celle qui sera enregistree. On letterboxe alors l'apercu
    pour montrer le vrai cadre, et on le dit au lieu de laisser croire. */
 function applyFormat(){
-  const s = trackSettings();
+  const s = renderedDims();
   const veutPortrait = st.fmt !== 169;
   const aPortrait = (s.width && s.height) ? s.height > s.width : veutPortrait;
   const ok = veutPortrait === aPortrait;
@@ -760,7 +775,7 @@ function onRecStop(){
   const type = (rec.mimeType || 'video/mp4').split(';')[0];
   lastBlob = new Blob(chunks, {type});
   chunks = [];
-  const set = stream && stream.getVideoTracks()[0] ? stream.getVideoTracks()[0].getSettings() : {};
+  const set = renderedDims();
   /* Debit reel = ce que Safari a vraiment encode. C'est la seule mesure qui dit si
      le reglage a servi a quelque chose : s'il s'effondre sous la cible, le navigateur bride. */
   const realVbs = dur > 0 ? (lastBlob.size * 8) / dur : 0;
