@@ -44,6 +44,14 @@
   .empty p{font-size:15px;line-height:1.5}
   .btn-primary{background:var(--text);color:#000;font-weight:700;font-size:16px;padding:14px 26px;border-radius:14px}
   .lib-foot{padding:8px 0 calc(var(--sab) + 10px);text-align:center;font-size:11px;color:var(--text2)}
+  .lib-foot button{font-size:11px;color:var(--text2);text-decoration:underline;padding:4px}
+  .head-actions{display:flex;align-items:center;gap:8px}
+  .btn-recv{height:44px;padding:0 16px;border-radius:22px;background:var(--surface);font-size:14px;font-weight:700}
+  .btn-recv.busy{opacity:.45;pointer-events:none}
+  .tag-new{display:inline-block;background:var(--blue);color:#fff;font-size:10px;font-weight:800;letter-spacing:.3px;
+    border-radius:6px;padding:2px 6px;margin-right:7px;vertical-align:2px;text-transform:uppercase}
+  .field{width:100%;background:var(--surface2);border:none;outline:none;color:var(--text);font-size:16px;
+    border-radius:12px;padding:13px 14px;margin-bottom:12px}
 
   /* ---------- Editeur ---------- */
   #s-edit{background:var(--bg)}
@@ -177,16 +185,19 @@
 <section class="screen on" id="s-lib">
   <div class="lib-head">
     <h1>Prompteur</h1>
-    <button class="btn-add" id="btn-new" aria-label="Nouveau script">
-      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-    </button>
+    <div class="head-actions">
+      <button class="btn-recv" id="btn-recv">Recevoir</button>
+      <button class="btn-add" id="btn-new" aria-label="Nouveau script">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+    </div>
   </div>
   <div class="cards" id="cards"></div>
   <div class="empty" id="empty" style="display:none">
     <p>Aucun script pour le moment.<br>Cree ton premier texte de prompteur.</p>
     <button class="btn-primary" id="btn-empty-new">Nouveau script</button>
   </div>
-  <div class="lib-foot">Prompteur perso v1.0</div>
+  <div class="lib-foot">Prompteur perso v1.1 · <button id="inbox-link"></button></div>
 </section>
 
 <!-- ============ EDITEUR ============ -->
@@ -320,6 +331,17 @@
   </div>
 </div>
 
+<!-- ============ SHEET BOITE DE RECEPTION ============ -->
+<div class="sheet" id="inbox-sheet">
+  <div class="sheet-inner">
+    <h2>Boite de reception</h2>
+    <p class="pip-note" style="margin:0 0 14px">Colle ici l'adresse du Gist ou arrivent les textes envoyes depuis le PC. Une seule fois : ensuite l'app va les chercher a chaque ouverture, et avec le bouton Recevoir.</p>
+    <input class="field" id="inbox-url" placeholder="https://gist.github.com/..." autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <button class="btn-primary" id="inbox-save" style="width:100%">Enregistrer et recevoir</button>
+    <button class="btn-ghost" id="inbox-cancel" style="width:100%;margin-top:10px;background:var(--surface2);border-radius:14px;padding:14px;font-weight:600">Annuler</button>
+  </div>
+</div>
+
 <canvas id="pip-canvas" width="720" height="404"></canvas>
 <video id="pip-video" playsinline muted></video>
 <div class="toast" id="toast"></div>
@@ -372,7 +394,10 @@ function fmtDate(ts){
          d.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'});
 }
 function renderLib(){
-  const list = store.scripts.slice().sort((a,b)=>b.updated-a.updated);
+  /* Les textes recus et pas encore ouverts passent devant : leur date est celle de
+     l'envoi depuis le PC, qui peut etre plus ancienne que la derniere retouche locale. */
+  const list = store.scripts.slice().sort((a,b)=>(!!b.isNew - !!a.isNew) || b.updated-a.updated);
+  renderInboxLink();
   const box = $('cards'); box.innerHTML = '';
   $('empty').style.display = list.length ? 'none' : 'flex';
   box.style.display = list.length ? 'block' : 'none';
@@ -381,8 +406,13 @@ function renderLib(){
     const main = document.createElement('div'); main.className='card-main';
     main.innerHTML = '<div class="card-title"></div><div class="card-sub"></div><div class="card-meta"></div>';
     main.querySelector('.card-title').textContent = s.title || 'Sans titre';
+    if(s.isNew){
+      const tag = document.createElement('span'); tag.className = 'tag-new'; tag.textContent = 'Nouveau';
+      main.querySelector('.card-title').prepend(tag);
+    }
     main.querySelector('.card-sub').textContent = s.text.slice(0,160);
-    main.querySelector('.card-meta').textContent = fmtDate(s.updated) + ' · ' + wordCount(s.text) + ' mots';
+    main.querySelector('.card-meta').textContent = fmtDate(s.updated) + ' · ' + wordCount(s.text) + ' mots'
+      + (s.recv && !s.edited ? ' · envoye du PC' : '');
     main.onclick = ()=> openPrompter(s.id);
     const acts = document.createElement('div'); acts.className='card-actions';
     const bE = document.createElement('button'); bE.className='icon-btn'; bE.setAttribute('aria-label','Modifier');
@@ -403,6 +433,7 @@ function wordCount(t){ return (t.trim().match(/\S+/g)||[]).length }
 function openEditor(id){
   editingId = id || null;
   const s = id ? store.scripts.find(x=>x.id===id) : null;
+  if(s) markSeen(s.id);
   $('edit-title').value = s ? s.title : '';
   $('edit-text').value = s ? s.text : '';
   show('s-edit');
@@ -418,7 +449,12 @@ $('edit-save').onclick = ()=>{
   const all = store.scripts;
   if(editingId){
     const s = all.find(x=>x.id===editingId);
-    if(s){ s.title = title || 'Sans titre'; s.text = text; s.updated = Date.now() }
+    if(s){
+      /* Retouche sur le telephone d'un texte recu du PC : une version renvoyee plus tard
+         ne l'ecrasera pas, elle arrivera a cote (voir mergeInbox). */
+      if(s.recv && (s.text !== text || s.title !== (title || 'Sans titre'))) s.edited = true;
+      s.title = title || 'Sans titre'; s.text = text; s.updated = Date.now();
+    }
   } else {
     all.push({ id: 'id'+Date.now().toString(36), title: title || 'Sans titre', text, updated: Date.now() });
   }
@@ -842,6 +878,7 @@ $('rv-close').onclick = ()=>{ $('rv-video').pause(); show('s-prompt'); openCam()
 function openPrompter(id){
   const s = store.scripts.find(x=>x.id===id);
   if(!s) return;
+  markSeen(s.id);
   current = s;
   tpText.textContent = s.text;
   applySettings();
@@ -977,8 +1014,143 @@ $('btn-set').onclick = ()=>{
 };
 $('set-close').onclick = ()=>{ $('set-sheet').classList.remove('on') };
 
+/* ================= Boite de reception (textes envoyes depuis le PC) ================= */
+/* Les textes valides sur le PC sont deposes dans un Gist secret (fichier inbox.json,
+   [{id, title, text, updated}]) par outils/envoyer.py, et c'est l'app qui va les chercher.
+   Pourquoi pas un lien d'import : sur iPhone, l'app installee sur l'ecran d'accueil n'a
+   pas la meme memoire que Safari, un lien ouvert depuis un message remplirait Safari.
+   L'adresse du Gist n'est jamais dans ce code (depot public) : elle se saisit une fois
+   et vit dans pt.settings, sous la forme "proprietaire/id". */
+const inboxState = {
+  get(){ try{ return JSON.parse(localStorage.getItem('pt.inbox')||'{}') }catch(e){ return {} } },
+  set(v){ localStorage.setItem('pt.inbox', JSON.stringify(v)) }
+};
+function parseInboxRef(v){
+  const m = String(v||'').match(/([A-Za-z0-9][A-Za-z0-9-]{0,38})\/([0-9a-f]{20,40})(?![0-9a-z])/i);
+  return m ? m[1] + '/' + m[2].toLowerCase() : '';
+}
+async function fetchWithTimeout(url, ms){
+  const ctl = new AbortController(), to = setTimeout(()=>ctl.abort(), ms);
+  try{ return await fetch(url, {cache:'no-store', signal:ctl.signal}) }
+  finally{ clearTimeout(to) }
+}
+/* Mesure du 2026-10-27, juste apres un envoi :
+   - API + ?t= : a jour tout de suite (sans ?t=, son cache CDN de 60 s rend l'ancienne
+     version) ; limitee a 60 appels par heure et par adresse IP, et en 4G l'IP est
+     partagee avec d'autres abonnes ;
+   - adresse brute : pas de limite, mais cache CDN (5 min annoncees) que ?t= NE contourne
+     PAS : encore l'ancienne version 45 s apres l'envoi, a jour en 1 a 2 min.
+   D'ou : l'API d'abord, l'adresse brute en secours (au pire un envoi arrive en retard,
+   la fusion ignore une version deja traitee). */
+async function fetchInboxItems(ref){
+  const [owner, id] = ref.split('/');
+  try{
+    const r = await fetchWithTimeout('https://api.github.com/gists/' + id + '?t=' + Date.now(), 10000);
+    if(!r.ok) throw new Error(r.status === 404 ? 'Gist introuvable' : 'HTTP ' + r.status);
+    const f = ((await r.json()).files || {})['inbox.json'];
+    if(!f) throw new Error('inbox.json absent du Gist');
+    if(!f.truncated) return JSON.parse(f.content);
+  }catch(e){
+    if(e && e.message === 'Gist introuvable') throw e;
+  }
+  const r = await fetchWithTimeout('https://gist.githubusercontent.com/' + owner + '/' + id + '/raw/inbox.json', 10000);
+  if(!r.ok) throw new Error(r.status === 404 ? 'Gist introuvable' : 'HTTP ' + r.status);
+  return await r.json();
+}
+/* Regles de fusion :
+   - id inconnu : le texte est ajoute ;
+   - id connu, jamais retouche sur le telephone : mis a jour sur place ;
+   - id connu mais retouche sur le telephone depuis sa reception : la version de Louis
+     est gardee, la nouvelle arrive a cote ;
+   - une version deja traitee (meme `updated`) ne revient jamais, meme si Louis a
+     supprime le texte depuis : supprimer reste definitif tant que le PC ne renvoie rien.
+   `updated` est la date d'envoi, horloge du PC : on ne la compare qu'a elle-meme, jamais
+   a l'horloge du telephone. */
+function mergeInbox(items){
+  const res = {added:0, updated:0, side:0};
+  if(!Array.isArray(items)) return res;
+  const ib = inboxState.get(), seen = ib.seen || {};
+  const all = store.scripts;
+  for(const it of items){
+    if(!it || typeof it.id !== 'string' || typeof it.text !== 'string' || !it.text.trim()) continue;
+    const sent = +it.updated || 0;
+    if(it.id in seen && sent <= seen[it.id]) continue;
+    seen[it.id] = sent;
+    const title = (typeof it.title === 'string' && it.title.trim()) || 'Sans titre';
+    const loc = all.find(x=>x.id===it.id);
+    const entry = {title, text:it.text, updated:sent || Date.now(), recv:sent, isNew:true};
+    if(!loc){
+      all.push(Object.assign({id:it.id}, entry)); res.added++;
+    } else if(loc.text === it.text && loc.title === title){
+      continue;                                   /* renvoi a l'identique : rien a signaler */
+    } else if(!loc.edited){
+      Object.assign(loc, entry); res.updated++;
+    } else {
+      all.push(Object.assign({id:it.id + '~' + sent.toString(36)}, entry, {title: title + ' (nouvelle version)'}));
+      res.side++;
+    }
+  }
+  store.scripts = all;
+  ib.seen = seen; ib.last = Date.now(); inboxState.set(ib);
+  return res;
+}
+function markSeen(id){
+  const all = store.scripts, s = all.find(x=>x.id===id);
+  if(s && s.isNew){ s.isNew = false; store.scripts = all }
+}
+let inboxBusy = false, inboxLastT = 0;
+async function receiveInbox(manual){
+  if(!st.inbox){ if(manual) openInboxSheet(); return }
+  if(inboxBusy) return;
+  inboxBusy = true; inboxLastT = Date.now();
+  $('btn-recv').classList.add('busy');
+  const onLib = ()=> $('s-lib').classList.contains('on');
+  try{
+    const r = mergeInbox(await fetchInboxItems(st.inbox));
+    const n = r.added + r.updated + r.side;
+    if(n){
+      renderLib();
+      if(onLib()) toast((n === 1 ? '1 texte recu du PC' : n + ' textes recus du PC')
+        + (r.side ? ' (ta version retouchee est gardee, la nouvelle est a cote)' : ''), 3500);
+    } else if(manual) toast('Rien de nouveau');
+  }catch(e){
+    /* Jamais bloquant : hors ligne, les textes attendront la prochaine ouverture. */
+    /* fetch rejette en TypeError ("Load failed" sur Safari) quand le reseau manque. */
+    if(manual && onLib()) toast(navigator.onLine === false || (e && e.name === 'TypeError')
+      ? 'Pas de connexion : les textes arriveront a la prochaine ouverture.'
+      : 'Reception impossible (' + (e && e.name === 'AbortError' ? 'delai depasse' : (e && e.message) || e) + ')', 3500);
+  }finally{
+    inboxBusy = false; $('btn-recv').classList.remove('busy');
+  }
+}
+function renderInboxLink(){
+  $('inbox-link').textContent = st.inbox ? 'Reception PC : reglee' : 'Reception PC : a regler';
+}
+function openInboxSheet(){
+  $('inbox-url').value = st.inbox ? 'https://gist.github.com/' + st.inbox : '';
+  $('inbox-sheet').classList.add('on');
+}
+$('btn-recv').onclick = ()=> receiveInbox(true);
+$('inbox-link').onclick = openInboxSheet;
+$('inbox-cancel').onclick = ()=>{ $('inbox-sheet').classList.remove('on') };
+$('inbox-save').onclick = ()=>{
+  const raw = $('inbox-url').value.trim();
+  if(!raw){ st.inbox = ''; store.settings = st; $('inbox-sheet').classList.remove('on'); renderInboxLink(); return }
+  const ref = parseInboxRef(raw);
+  if(!ref){ toast("Adresse non reconnue : colle l'adresse complete du Gist (gist.github.com/compte/...)", 3500); return }
+  st.inbox = ref; store.settings = st;
+  $('inbox-sheet').classList.remove('on'); renderInboxLink();
+  receiveInbox(true);
+};
+/* Retour dans l'app (elle reste souvent ouverte en arriere-plan sur iOS) : on relit la
+   boite si on est sur la bibliotheque, au plus une fois toutes les 20 s. */
+document.addEventListener('visibilitychange', ()=>{
+  if(!document.hidden && $('s-lib').classList.contains('on') && Date.now() - inboxLastT > 20000) receiveInbox(false);
+});
+
 /* ================= Init ================= */
 renderLib();
+receiveInbox(false);
 if('serviceWorker' in navigator){
   window.addEventListener('load', ()=>{ navigator.serviceWorker.register('sw.js').catch(()=>{}) });
 }
