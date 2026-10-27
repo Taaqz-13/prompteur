@@ -350,11 +350,15 @@
 'use strict';
 /* ================= Etat & stockage ================= */
 const $ = id => document.getElementById(id);
+/* Boite de reception des textes envoyes depuis le PC (outils/envoyer.py), reglee d'office :
+   Louis lance l'app et les textes sont la, sans rien saisir (choix du 2026-10-27). Contrepartie
+   acceptee : le depot est public, donc les textes de la boite sont lisibles par qui lit ce code. */
+const INBOX_DEFAUT = 'Taaqz-13/a1c3c96f3b0b3b7a329bac9150a744ef';
 const store = {
   get scripts(){ try{ return JSON.parse(localStorage.getItem('pt.scripts')||'[]') }catch(e){ return [] } },
   set scripts(v){ localStorage.setItem('pt.scripts', JSON.stringify(v)) },
   get settings(){ let s={}; try{ s=JSON.parse(localStorage.getItem('pt.settings')||'{}') }catch(e){}
-    const d = Object.assign({speed:40, fs:32, facing:'user', res:1080, fps:30, mbps:0, qv:0, fmt:916}, s);
+    const d = Object.assign({speed:40, fs:32, facing:'user', res:1080, fps:30, mbps:0, qv:0, fmt:916, inbox:INBOX_DEFAUT}, s);
     if(d.mbps === 16) d.mbps = 0;   /* palier retire : on retombe sur l'auto, sinon reglage fantome */
     /* v2 : "Maximum + 12 Mbps fixe" sous-alimentait l'encodeur (blocs des que le sujet bouge).
        v3 : retour a un debit auto prudent apres le decrochage de l'encodeur en v2. */
@@ -1019,8 +1023,8 @@ $('set-close').onclick = ()=>{ $('set-sheet').classList.remove('on') };
    [{id, title, text, updated}]) par outils/envoyer.py, et c'est l'app qui va les chercher.
    Pourquoi pas un lien d'import : sur iPhone, l'app installee sur l'ecran d'accueil n'a
    pas la meme memoire que Safari, un lien ouvert depuis un message remplirait Safari.
-   L'adresse du Gist n'est jamais dans ce code (depot public) : elle se saisit une fois
-   et vit dans pt.settings, sous la forme "proprietaire/id". */
+   Adresse par defaut : INBOX_DEFAUT (en tete de script). Elle reste modifiable en bas de
+   la bibliotheque et vit dans pt.settings, sous la forme "proprietaire/id". */
 const inboxState = {
   get(){ try{ return JSON.parse(localStorage.getItem('pt.inbox')||'{}') }catch(e){ return {} } },
   set(v){ localStorage.setItem('pt.inbox', JSON.stringify(v)) }
