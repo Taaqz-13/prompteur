@@ -1,9 +1,15 @@
 /* Service worker : app disponible hors ligne */
-const CACHE = 'prompteur-v3';
+const CACHE = 'prompteur-v4';
 const ASSETS = ['./', './index.html', './manifest.json', './icon-180.png', './icon-192.png', './icon-512.png'];
 
+/* GitHub Pages sert tout avec Cache-Control: max-age=600. Sans `cache:'reload'` /
+   `'no-cache'`, le "reseau d'abord" ci-dessous tombait sur le cache HTTP du telephone
+   et relancait la version d'il y a jusqu'a 10 min (constate le 2026-10-27 : Louis a
+   rouvert l'app une minute apres une mise en ligne et a eu l'ancienne). */
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE)
+    .then(c => c.addAll(ASSETS.map(u => new Request(u, {cache: 'reload'}))))
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', e => {
@@ -22,7 +28,7 @@ self.addEventListener('fetch', e => {
 
   if (e.request.mode === 'navigate' || url.pathname.endsWith('index.html')) {
     e.respondWith(
-      fetch(e.request)
+      fetch(new Request(e.request, {cache: 'no-cache'}))   /* revalide aupres du serveur a chaque lancement */
         .then(r => { const copy = r.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); return r; })
         .catch(() => caches.match(e.request).then(r => r || caches.match('./index.html')))
     );
